@@ -1,0 +1,11 @@
+policy:
+  refuse_threshold: 0.80
+  safe_response_threshold: 0.50
+  malicious_intent_threshold: 0.80
+  review_on_required_tool_failure: true
+  block_on_toxin_output: true
+  trajectory_escalation_boost: 0.15
+
+interventions:
+  refusal_message: "I cannot fulfill this request because it involves potentially hazardous biological materials or dual-use capabilities with biosecurity risks."
+  safe_response_prefix: "I cannot provide operational, synthesis, or enhancement instructions for hazardous biological agents or toxins. However, I can discuss the topic from a high-level scientific, defense, or biosafety perspective."

@@ -1,0 +1,21 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local databases and logs
+*.db
+logs/
+*.log
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# OS and IDE files
+.DS_Store
+.vscode/
+.idea/
