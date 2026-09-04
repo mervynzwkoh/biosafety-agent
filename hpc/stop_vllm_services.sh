@@ -1,5 +1,8 @@
 #!/bin/bash
-# Stop running vLLM servers
-echo "Stopping any running vLLM servers..."
-pkill -f "vllm.entrypoints.openai.api_server" || true
-echo "vLLM processes stopped."
+# Force-stop all running vLLM servers and tensor parallel workers
+echo "Force-stopping all vLLM server and worker processes..."
+pkill -9 -f vllm || true
+sleep 1
+echo "Checking GPU status..."
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader || echo "All GPUs clear."
+echo "vLLM cleanup complete."
