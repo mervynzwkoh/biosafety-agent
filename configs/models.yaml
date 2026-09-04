@@ -1,6 +1,9 @@
+# Configuration for single-model deployment
+# The same model instance serves as both the defense reasoning agent and the target assistant.
+
 reasoning_model:
-  backend: "simulated" # Options: "vllm", "openai", "simulated"
-  model: "Qwen/Qwen2.5-7B-Instruct"
+  backend: "vllm" # Set to "vllm" for live model, or "simulated" for offline test
+  model: "deepseek-v4-flash"
   base_url: "http://localhost:8000/v1"
   api_key: "EMPTY"
   temperature: 0.0
@@ -9,9 +12,10 @@ reasoning_model:
   max_repair_retries: 1
 
 target_model:
-  backend: "simulated" # Options: "vllm", "openai", "simulated", "echo"
-  model: "meta-llama/Meta-Llama-3-8B-Instruct"
-  base_url: "http://localhost:8001/v1"
+  backend: "vllm" # Set to "vllm" for live model, or "simulated" for offline test
+  model: "deepseek-v4-flash"
+  base_url: "http://localhost:8000/v1"
   api_key: "EMPTY"
+  system_prompt: "You are a helpful, knowledgeable biological science and research assistant."
   temperature: 0.7
-  max_tokens: 1024
+  max_tokens: 2048

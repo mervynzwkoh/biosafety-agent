@@ -77,11 +77,12 @@ def create_defense_system(
         backend_type = t_conf.get("backend", "simulated")
         if backend_type == "vllm" or backend_type == "openai":
             target_backend = VLLMTargetBackend(
-                base_url=t_conf.get("base_url", "http://localhost:8001/v1"),
+                base_url=t_conf.get("base_url", "http://localhost:8000/v1"),
                 api_key=t_conf.get("api_key", "EMPTY"),
-                model=t_conf.get("model", "meta-llama/Meta-Llama-3-8B-Instruct"),
+                model=t_conf.get("model", "deepseek-v4-flash"),
+                system_prompt=t_conf.get("system_prompt", "You are a helpful, knowledgeable biological science and research assistant."),
                 temperature=t_conf.get("temperature", 0.7),
-                max_tokens=t_conf.get("max_tokens", 1024),
+                max_tokens=t_conf.get("max_tokens", 2048),
             )
         else:
             target_backend = SimulatedTargetBackend()

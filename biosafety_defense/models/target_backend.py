@@ -18,22 +18,28 @@ class VLLMTargetBackend(BaseTargetBackend):
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8001/v1",
+        base_url: str = "http://localhost:8000/v1",
         api_key: str = "EMPTY",
-        model: str = "meta-llama/Meta-Llama-3-8B-Instruct",
+        model: str = "deepseek-v4-flash",
+        system_prompt: Optional[str] = "You are a helpful, knowledgeable biological science and research assistant.",
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
         timeout: float = 60.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.system_prompt = system_prompt
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
 
     def generate(self, history: List[ConversationTurn], user_message: str) -> str:
-        messages = [{"role": t.role, "content": t.content} for t in history]
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        for t in history:
+            messages.append({"role": t.role, "content": t.content})
         messages.append({"role": "user", "content": user_message})
 
         headers = {
