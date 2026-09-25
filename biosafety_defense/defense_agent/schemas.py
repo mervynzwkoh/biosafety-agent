@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class IntentClass(str, Enum):
@@ -118,6 +118,27 @@ class DefenseAssessment(BaseModel):
     recommended_action: ActionType = ActionType.ALLOW
     state_update: StateUpdate = Field(default_factory=StateUpdate)
     rationale: Optional[str] = None
+
+    @model_validator(mode="after")
+    def normalize_and_ensure_summaries(self) -> DefenseAssessment:
+        """Ensure intent summaries and rationales are cross-populated and never blank if text is available."""
+        fallback = (
+            self.state_update.intent_summary
+            or self.current_user_intent.summary
+            or self.analysis_summary
+            or self.rationale
+            or ""
+        )
+        if fallback:
+            if not self.analysis_summary:
+                self.analysis_summary = fallback
+            if not self.current_user_intent.summary:
+                self.current_user_intent.summary = fallback
+            if not self.state_update.intent_summary:
+                self.state_update.intent_summary = fallback
+            if not self.rationale:
+                self.rationale = fallback
+        return self
 
 
 class BiologicalArtifactValidation(BaseModel):

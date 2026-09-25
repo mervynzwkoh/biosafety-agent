@@ -24,10 +24,14 @@ from biosafety_defense.defense_agent.schemas import (
     UserIntentAssessment,
 )
 
-REPAIR_SYSTEM_PROMPT = (
-    "You are a JSON repair assistant. The previous output failed schema validation. "
-    "Fix any syntax errors or missing required keys and output valid JSON matching the exact schema."
-)
+from biosafety_defense.defense_agent.prompts import DEFENSE_ASSESSMENT_JSON_SCHEMA
+
+REPAIR_SYSTEM_PROMPT = f"""You are a JSON repair assistant. The previous output failed schema validation.
+Fix any syntax errors or missing required keys and output valid JSON matching this exact schema:
+```json
+{DEFENSE_ASSESSMENT_JSON_SCHEMA}
+```
+All fields (especially 'analysis_summary', 'current_user_intent', 'state_update.intent_summary', and 'rationale') must be non-empty strings. Return valid JSON only."""
 
 
 class BaseReasoningBackend:
@@ -72,12 +76,17 @@ class VLLMReasoningBackend(BaseReasoningBackend):
         # Attempt parsing and schema validation
         try:
             parsed = self._extract_json(raw_response)
-            return DefenseAssessment(**parsed)
-        except (json.JSONDecodeError, ValidationError) as err:
+            assessment = DefenseAssessment(**parsed)
+            if not assessment.state_update.intent_summary and not assessment.analysis_summary:
+                raise ValueError("Model output did not contain any intent summary or analysis summary.")
+            return assessment
+        except (json.JSONDecodeError, ValidationError, ValueError) as err:
             if self.max_repair_retries > 0:
                 repaired = self._attempt_repair(raw_response, str(err), system_prompt)
                 if repaired:
                     return repaired
+            if "assessment" in locals():
+                return assessment
             raise ValueError(f"Failed to obtain valid DefenseAssessment: {err}")
 
     def _call_completion(self, messages: List[Dict[str, str]]) -> str:
@@ -106,7 +115,7 @@ class VLLMReasoningBackend(BaseReasoningBackend):
             {"role": "system", "content": REPAIR_SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": f"Original output:\n{raw_output}\n\nValidation error:\n{error_msg}\n\nReturn fixed JSON.",
+                "content": f"Original output:\n{raw_output}\n\nValidation error:\n{error_msg}\n\nReturn fixed JSON matching DefenseAssessment schema.",
             },
         ]
         try:
@@ -118,13 +127,31 @@ class VLLMReasoningBackend(BaseReasoningBackend):
 
     def _extract_json(self, text: str) -> Dict[str, Any]:
         text = text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        return json.loads(text.strip())
+        # 1. Strip reasoning model <think>...</think> blocks if present
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+
+        # 2. Check for markdown code fences
+        match_fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+        if match_fence:
+            candidate = match_fence.group(1).strip()
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+        # 3. Direct JSON loads
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 4. Outermost brace fallback
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(text[start : end + 1])
+
+        raise json.JSONDecodeError("No valid JSON object found in output", text, 0)
 
 
 class SimulatedReasoningBackend(BaseReasoningBackend):

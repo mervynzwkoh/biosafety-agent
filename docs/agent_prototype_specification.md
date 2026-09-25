@@ -1,4 +1,4 @@
-﻿No clarification is necessary for a first prototype. I would deliberately keep **v0 narrower than the eventual research system**: one persistent reasoning agent, one target LLM, pre- and post-generation screening, conversation-level state, structured tool calling, and ToxinPred2 as the first biological tool. Do **not** implement MTSA training yet; design the interfaces so that trajectory-level alignment can be added later.
+No clarification is necessary for a first prototype. I would deliberately keep **v0 narrower than the eventual research system**: one persistent reasoning agent, one target LLM, pre- and post-generation screening, conversation-level state, structured tool calling, and ToxinPred2 as the first biological tool. Do **not** implement MTSA training yet; design the interfaces so that trajectory-level alignment can be added later.
 
 The specification below is grounded in the four papers. Meng & Zhang motivates pre/post runtime guarding and tool orchestration; MTSA motivates treating conversation history as safety-relevant state; BioSecBench-Refusal motivates distinguishing underlying intent from risky-looking vocabulary; and SPIKE motivates modality-specific biological tools because text reasoning alone may not adequately assess biological artifacts.    
 
@@ -837,23 +837,20 @@ if artifacts:
     available_tools.append("toxinpred2")
 ```
 
-Then allow the reasoning model to decide whether it needs the tool.
-
-For **post-generation protein sequences**, I would make ToxinPred2 invocation automatic in v0:
+For **both input and post-generation protein sequences**, make ToxinPred2 invocation automatic in v0 whenever sequence artifacts are extracted:
 
 ```python
 if artifact.type == "PROTEIN_SEQUENCE":
     run_toxinpred2 = True
 ```
 
-This is simpler and safer than relying on the reasoning model to remember to call it.
+This eliminates pre/post screening asymmetry and ensures that an attacker cannot bypass tool screening by submitting candidate toxins on the input side.
 
 Thus:
-
 ```text
-Agent-driven routing
+Mandatory deterministic routing for extracted protein sequences (input & output)
 +
-mandatory deterministic routing for selected artifact classes
+Agent-driven routing for future extensible tool requests
 ```
 
 ---
@@ -917,20 +914,17 @@ Send candidate output unchanged.
 
 ### `REFUSE`
 
-Do not call the target model during pre-screening, or suppress its candidate response during post-screening.
+Do not call the target model during pre-screening, or replace its candidate response during post-screening using a **deterministic static refusal template** (ensuring zero risk of model-generated secondary leakage).
 
 ### `SAFE_RESPONSE`
 
-Allow a separate constrained response path.
-
-For v0 this can simply be:
+Return a deterministic static educational redirect template:
 
 ```text
-I can't assist with that request. I can help with a safer,
-non-operational discussion of the topic instead.
+I cannot assist with operational biological protocols or hazardous sequences. I can provide high-level, non-operational theoretical concepts from published literature instead.
 ```
 
-Do not have the target model "sanitize its own unsafe response" yet.
+The target model is treated strictly as an unaligned black-box and is never asked to "sanitize its own unsafe response."
 
 ### `REVIEW`
 
@@ -1032,35 +1026,24 @@ state = update_state(
 )
 ```
 
-Important: update the history with **what the user actually received**, not the blocked target response.
-
-Keep blocked candidate outputs in the audit log, but not in the conversational transcript presented as assistant messages.
+Important:
+1. Update dialogue history with **what the user actually received**, not the blocked candidate target response.
+2. Keep blocked candidate outputs in the audit log, but not in the conversational transcript presented as assistant messages.
+3. **Monotonic State Accumulation:** In `SafetyStateStore`, observed capabilities, escalation signals, and historical risk flags must be **strictly append-only / monotonic**. This guarantees that benign filler turns cannot dilute, overwrite, or smooth over earlier detected biosecurity concerns.
 
 ---
 
-# 25. Long Conversations
+# 25. Conversation Context Management
 
-Initially, pass the complete conversation while it fits.
-
-When context becomes large:
+For the v0 prototype sessions (up to 30 turns):
 
 ```text
-recent raw turns
+Maintain full unbroken conversation history H_t
 +
-structured safety state
-+
-older safety summary
+Monotonically accumulated structured safety state
 ```
 
-Example:
-
-```text
-Turns 1-30 → safety summary
-Turns 31-40 → raw text
-Current turn → raw text
-```
-
-Never summarize away safety-relevant escalation signals without preserving them structurally.
+Do not perform lossy prompt summarization or turn truncation during prototype sessions. Passing the full transcript prevents summary drift and ensures that multi-turn capability accumulation remains fully visible to both the defense reasoning agent and the target model.
 
 ---
 
@@ -1119,53 +1102,54 @@ def handle_user_message(conversation_id, user_text):
     history = conversation_store.load(conversation_id)
 
     # -----------------------------------------
-    # PRE-GENERATION DEFENSE
+    # FEATURE EXTRACTION & FAST-PATH TRIAGE
     # -----------------------------------------
 
     input_artifacts = artifact_parser.extract(user_text)
+
+    # Fast-path triage: bypass heavy reasoning on mundane non-biological turns
+    if triage.is_fast_pass_eligible(user_text, input_artifacts, state):
+        response = target_model.generate(history + [user_text])
+        conversation_store.append(conversation_id, user_text, response)
+        audit.log_fast_pass(...)
+        return response
+
+    # -----------------------------------------
+    # PRE-GENERATION DEFENSE
+    # -----------------------------------------
+
+    # Mandatory input sequence screening (fixes pre/post asymmetry)
+    pre_tool_results = []
+    for artifact in input_artifacts:
+        if artifact.type == PROTEIN_SEQUENCE:
+            pre_tool_results.append(toxinpred2.predict(artifact))
 
     pre_context = DefenseContext(
         stage="PRE",
         history=history,
         current_user_message=user_text,
         safety_state=state,
-        artifacts=input_artifacts
+        artifacts=input_artifacts,
+        tool_results=pre_tool_results
     )
 
     pre_result = defense_agent.evaluate(pre_context)
-
-    pre_result = resolve_tools(
-        defense_agent,
-        pre_context,
-        pre_result
-    )
-
     pre_action = policy.decide(pre_result)
 
     if pre_action != ALLOW:
+        # Deterministic static refusal / educational redirect template (zero model leakage)
+        safe_response = intervention.get_static_template(pre_action, pre_result)
 
-        safe_response = intervention.generate(
-            pre_action,
-            pre_result
-        )
-
-        conversation_store.append(
-            conversation_id,
-            user_text,
-            safe_response
-        )
-
+        conversation_store.append(conversation_id, user_text, safe_response)
         state_store.save(
             conversation_id,
-            update_state(state, pre_result)
+            update_state_monotonic(state, pre_result, pre_action)
         )
-
-        audit.log(...)
-
+        audit.log_decision(...)
         return safe_response
 
     # -----------------------------------------
-    # TARGET GENERATION
+    # ISOLATED TARGET GENERATION (BLACK BOX)
     # -----------------------------------------
 
     candidate = target_model.generate(
@@ -1178,6 +1162,12 @@ def handle_user_message(conversation_id, user_text):
 
     output_artifacts = artifact_parser.extract(candidate)
 
+    # Mandatory output sequence screening
+    post_tool_results = []
+    for artifact in output_artifacts:
+        if artifact.type == PROTEIN_SEQUENCE:
+            post_tool_results.append(toxinpred2.predict(artifact))
+
     post_context = DefenseContext(
         stage="POST",
         history=history,
@@ -1185,53 +1175,25 @@ def handle_user_message(conversation_id, user_text):
         candidate_response=candidate,
         pre_assessment=pre_result,
         safety_state=state,
-        artifacts=output_artifacts
+        artifacts=output_artifacts,
+        tool_results=post_tool_results
     )
-
-    # Mandatory artifact tools
-    tool_results = []
-
-    for artifact in output_artifacts:
-
-        if artifact.type == PROTEIN_SEQUENCE:
-            tool_results.append(
-                toxinpred2.predict(artifact)
-            )
-
-    post_context.tool_results = tool_results
 
     post_result = defense_agent.evaluate(post_context)
-
-    post_result = resolve_tools(
-        defense_agent,
-        post_context,
-        post_result
-    )
-
     post_action = policy.decide(post_result)
 
-    final_response = intervention.apply(
-        action=post_action,
-        candidate=candidate,
-        assessment=post_result
-    )
+    if post_action != ALLOW:
+        # Static template replacement for blocked candidate outputs
+        final_response = intervention.get_static_template(post_action, post_result)
+    else:
+        final_response = candidate
 
-    conversation_store.append(
-        conversation_id,
-        user_text,
-        final_response
-    )
-
+    conversation_store.append(conversation_id, user_text, final_response)
     state_store.save(
         conversation_id,
-        update_state(
-            state,
-            pre_result,
-            post_result
-        )
+        update_state_monotonic(state, pre_result, post_result, post_action)
     )
-
-    audit.log(...)
+    audit.log_decision(...)
 
     return final_response
 ```

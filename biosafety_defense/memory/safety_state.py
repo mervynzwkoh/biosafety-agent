@@ -64,18 +64,35 @@ class SafetyStateStore:
         if not active_assessment:
             return previous_state
 
-        # 1. Update inferred intent
+        # 1. Update inferred intent with robust fallbacks
+        intent_summary = (
+            active_assessment.state_update.intent_summary
+            or active_assessment.current_user_intent.summary
+            or active_assessment.analysis_summary
+            or active_assessment.rationale
+            or previous_state.inferred_intent.get("summary", "")
+            or "Intent not explicitly articulated."
+        )
+        confidence = active_assessment.current_user_intent.confidence
+        if confidence == 0.0 and intent_summary and intent_summary != "Intent not explicitly articulated.":
+            confidence = 0.80
+
         inferred_intent = {
-            "summary": active_assessment.state_update.intent_summary
-            or active_assessment.current_user_intent.summary,
-            "confidence": active_assessment.current_user_intent.confidence,
+            "summary": intent_summary,
+            "confidence": confidence,
             "classification": active_assessment.current_user_intent.classification.value,
         }
 
-        # 2. Update risk state
+        # 2. Update risk state with monotonic trajectory risk tracking
+        prev_risk = previous_state.risk_state or {}
+        max_trajectory_risk = max(
+            float(prev_risk.get("trajectory_risk", 0.0) or 0.0),
+            float(active_assessment.risk_assessment.trajectory_risk or 0.0),
+        )
+
         risk_state = {
             "current_turn_risk": active_assessment.risk_assessment.input_risk,
-            "trajectory_risk": active_assessment.risk_assessment.trajectory_risk,
+            "trajectory_risk": max_trajectory_risk,
             "artifact_risk": active_assessment.risk_assessment.artifact_risk,
             "overall_risk": active_assessment.risk_assessment.overall_risk,
             "uncertainty": active_assessment.risk_assessment.uncertainty,
