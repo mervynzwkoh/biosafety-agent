@@ -114,9 +114,8 @@ biosafety-agent/
 │
 ├── hpc/
 │   ├── start_single_vllm.sh             # Launch single vLLM server on remote GPUs
-│   ├── start_vllm_background.sh         # Launch dual vLLM servers in background
-│   ├── stop_vllm_services.sh            # Terminate running vLLM server processes
-│   └── launch_vllm_services.sh          # SLURM multi-GPU batch submission script
+│   ├── interactive_session.sh           # Launch interactive defense agent session
+│   └── stop_vllm_services.sh            # Terminate running vLLM and release GPU memory
 │
 ├── tests/
 │   ├── conftest.py                      # Pytest fixtures

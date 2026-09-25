@@ -33,7 +33,9 @@ CUDA_VISIBLE_DEVICES=${GPU_DEVICES} nohup vllm serve \
     --kv-cache-dtype fp8 > logs/vllm_server.log 2>&1 &
 
 PID_SERVER=$!
+echo "${PID_SERVER}" > logs/vllm_server.pid
 echo "vLLM server started in background with PID: ${PID_SERVER}"
+echo "PID saved to: logs/vllm_server.pid"
 echo "Logs are streaming to: logs/vllm_server.log"
 echo "Check readiness with: tail -f logs/vllm_server.log"
 echo "=========================================================="
