@@ -65,12 +65,17 @@ class AuditLogger:
                 {
                     "name": t.tool,
                     "artifact_id": t.artifact_id,
+                    "turn": t.turn if t.turn is not None else turn,
+                    "stage": t.stage if t.stage is not None else stage,
                     "status": t.status.value,
                     "result": t.prediction.label if t.prediction else None,
                     "score": t.prediction.score if t.prediction else None,
                     "error_type": t.error_type,
                 }
-                for t in tools
+                for t in {
+                    (t.tool, t.artifact_id, t.turn if t.turn is not None else turn, t.stage if t.stage is not None else stage): t
+                    for t in tools
+                }.values()
             ],
             "artifacts_detected": len(artifacts or []),
             "action": action.value,
@@ -93,13 +98,21 @@ class AuditLogger:
         tool_evidence: List[ToolResult],
         action: ActionType,
     ) -> None:
-        """Log training-compatible records for future MTSA-style alignment per Section 32 & 33."""
+        # Deduplicate turn-level tool evidence
+        seen_tools = set()
+        deduped_turn_tools = []
+        for t in tool_evidence:
+            key = (t.tool, t.artifact_id, t.turn if t.turn is not None else turn, t.stage)
+            if key not in seen_tools:
+                seen_tools.add(key)
+                deduped_turn_tools.append(t.model_dump())
+
         record = {
             "trajectory_id": conversation_id,
             "turn": turn,
             "history": [{"role": t.role, "content": t.content} for t in history],
             "current_request": current_request,
-            "tool_evidence": [t.model_dump() for t in tool_evidence],
+            "tool_evidence": deduped_turn_tools,
             "state_at_turn": safety_state.model_dump(),
             "agent_assessment": assessment.model_dump(),
             "action": action.value,
@@ -109,3 +122,28 @@ class AuditLogger:
 
         with open(self.trajectory_log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
+
+    def log_fast_pass(
+        self,
+        conversation_id: str,
+        turn: int,
+        model_info: Dict[str, str],
+        user_text: str,
+        latency_ms: Dict[str, float],
+    ) -> None:
+        """Write an audit record for a fast-pass triaged turn."""
+        record = {
+            "timestamp": time.time(),
+            "conversation_id": conversation_id,
+            "turn": turn,
+            "stage": "TRIAGE",
+            "model": model_info,
+            "action": "FAST_PASS",
+            "latency_ms": latency_ms,
+            "artifacts_detected": 0,
+            "user_text_length": len(user_text),
+            "fast_pass": True,
+        }
+        with open(self.audit_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+

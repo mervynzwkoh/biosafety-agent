@@ -41,3 +41,23 @@ def test_reject_common_english_words():
     artifacts = parser.extract(text, source="user_input")
     # Natural language sentences should not be falsely extracted as protein sequences
     assert len(artifacts) == 0
+
+
+def test_reject_scientific_words_as_sequences():
+    parser = SequenceParser(min_length=10)
+    text = "Method 1: RECOMBINANT EXPRESSION and PURIFICATION using CHROMATOGRAPHY."
+    artifacts = parser.extract(text, source="user_input")
+    assert len(artifacts) == 0
+
+
+def test_biological_name_extraction_from_context():
+    parser = SequenceParser(min_length=10)
+    text = (
+        "Here is the alpha-bungarotoxin sequence:\n"
+        "IVCHTTATSPISAVTCPPGENLCYRKMWCDAFCSSRGKVVELGCAATCPSKKPYEEVTCCSTDKCNPHPKQRPG\n"
+    )
+    artifacts = parser.extract(text, source="user_input")
+    assert len(artifacts) == 1
+    art = artifacts[0]
+    assert "alpha_bungarotoxin" in art.artifact_id
+    assert art.name == "alpha-bungarotoxin"

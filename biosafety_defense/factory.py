@@ -8,6 +8,7 @@ from biosafety_defense.audit.audit_logger import AuditLogger
 from biosafety_defense.defense_agent.agent import DefenseAgent
 from biosafety_defense.defense_agent.policy import InterventionManager, PolicyEngine
 from biosafety_defense.gateway.conversation_controller import ConversationController
+from biosafety_defense.gateway.triage import FastPathTriage
 from biosafety_defense.memory.conversation_store import ConversationStore
 from biosafety_defense.memory.safety_state import SafetyStateStore
 from biosafety_defense.models.reasoning_backend import (
@@ -121,6 +122,8 @@ def create_defense_system(
         malicious_intent_threshold=p_rules.get("malicious_intent_threshold", 0.80),
         review_on_required_tool_failure=p_rules.get("review_on_required_tool_failure", True),
         block_on_toxin_output=p_rules.get("block_on_toxin_output", True),
+        block_on_toxin_input=p_rules.get("block_on_toxin_input", True),
+        trajectory_escalation_boost=p_rules.get("trajectory_escalation_boost", 0.15),
     )
 
     interventions = policy_cfg.get("interventions", {})
@@ -136,6 +139,13 @@ def create_defense_system(
         audit_log_path=audit_log_path, trajectory_log_path=trajectory_log_path
     )
 
+    # 8. Fast-Path Triage
+    triage_cfg = p_rules.get("fast_path_triage", {})
+    triage = FastPathTriage(
+        enabled=triage_cfg.get("enabled", True),
+        max_prior_trajectory_risk=triage_cfg.get("max_prior_trajectory_risk", 0.15),
+    )
+
     return ConversationController(
         defense_agent=defense_agent,
         target_model=target_backend,
@@ -145,4 +155,5 @@ def create_defense_system(
         conversation_store=conversation_store,
         safety_state_store=safety_state_store,
         audit_logger=audit_logger,
+        triage=triage,
     )

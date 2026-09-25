@@ -4,7 +4,11 @@ policy:
   malicious_intent_threshold: 0.80
   review_on_required_tool_failure: true
   block_on_toxin_output: true
+  block_on_toxin_input: true
   trajectory_escalation_boost: 0.15
+  fast_path_triage:
+    enabled: true
+    max_prior_trajectory_risk: 0.15
 
 interventions:
   refusal_message: "I cannot fulfill this request because it involves potentially hazardous biological materials or dual-use capabilities with biosecurity risks."

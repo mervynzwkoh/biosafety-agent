@@ -148,8 +148,9 @@ class BiologicalArtifactValidation(BaseModel):
 
 class BiologicalArtifact(BaseModel):
     artifact_id: str
+    name: Optional[str] = None
     type: ArtifactType
-    source: str # "user_input" or "target_output"
+    source: str  # "user_input" or "target_output"
     length: int
     normalized_sequence: str
     sha256: str
@@ -157,7 +158,7 @@ class BiologicalArtifact(BaseModel):
 
 
 class PredictionResult(BaseModel):
-    label: str # "TOXIN" or "NON_TOXIN"
+    label: str  # "TOXIN" or "NON_TOXIN"
     score: float = Field(ge=0.0, le=1.0)
 
 
@@ -170,6 +171,8 @@ class ToolResult(BaseModel):
     tool: str
     version: str = "2.0"
     artifact_id: str
+    turn: Optional[int] = None
+    stage: Optional[str] = None
     prediction: Optional[PredictionResult] = None
     status: ToolStatus = ToolStatus.SUCCESS
     error_type: Optional[str] = None

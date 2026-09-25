@@ -23,12 +23,16 @@ class PolicyEngine:
         malicious_intent_threshold: float = 0.80,
         review_on_required_tool_failure: bool = True,
         block_on_toxin_output: bool = True,
+        block_on_toxin_input: bool = True,
+        trajectory_escalation_boost: float = 0.15,
     ):
         self.refuse_threshold = refuse_threshold
         self.safe_response_threshold = safe_response_threshold
         self.malicious_intent_threshold = malicious_intent_threshold
         self.review_on_required_tool_failure = review_on_required_tool_failure
         self.block_on_toxin_output = block_on_toxin_output
+        self.block_on_toxin_input = block_on_toxin_input
+        self.trajectory_escalation_boost = trajectory_escalation_boost
 
     def decide(
         self,
@@ -43,8 +47,8 @@ class PolicyEngine:
             if has_failed_tool:
                 return ActionType.REVIEW
 
-        # 2. Check for toxin output in POST stage
-        if stage == "POST" and self.block_on_toxin_output and tool_results:
+        # 2. Check for toxin detection in PRE or POST stage
+        if tool_results:
             has_toxin = any(
                 tr.status == ToolStatus.SUCCESS
                 and tr.prediction
@@ -52,7 +56,10 @@ class PolicyEngine:
                 for tr in tool_results
             )
             if has_toxin:
-                return ActionType.REFUSE
+                if stage == "POST" and self.block_on_toxin_output:
+                    return ActionType.REFUSE
+                if stage == "PRE" and self.block_on_toxin_input:
+                    return ActionType.REFUSE
 
         # 3. Check for explicit high-confidence malicious intent
         intent = assessment.current_user_intent
@@ -62,12 +69,21 @@ class PolicyEngine:
         ):
             return ActionType.REFUSE
 
-        # 4. Check overall risk score against thresholds
-        overall_risk = assessment.risk_assessment.overall_risk
-        if overall_risk >= self.refuse_threshold:
+        # 4. Check overall risk score against thresholds with escalation boost
+        effective_risk = assessment.risk_assessment.overall_risk
+        if assessment.trajectory_analysis and assessment.trajectory_analysis.signals:
+            has_escalation = any(
+                getattr(sig, "type", None) in ("ESCALATION", "DECOMPOSITION")
+                or (hasattr(sig.type, "value") and sig.type.value in ("ESCALATION", "DECOMPOSITION"))
+                for sig in assessment.trajectory_analysis.signals
+            )
+            if has_escalation:
+                effective_risk = min(1.0, effective_risk + self.trajectory_escalation_boost)
+
+        if effective_risk >= self.refuse_threshold:
             return ActionType.REFUSE
 
-        if overall_risk >= self.safe_response_threshold:
+        if effective_risk >= self.safe_response_threshold:
             return ActionType.SAFE_RESPONSE
 
         # 5. Respect LLM recommended action if stricter than ALLOW
@@ -110,8 +126,8 @@ class InterventionManager:
             )
 
         if action == ActionType.SAFE_RESPONSE:
-            summary = assessment.analysis_summary
-            return f"{self.safe_response_prefix}\n\nContext summary: {summary}"
+            # Deterministic canned educational redirect without leaking internal chain-of-thought
+            return self.safe_response_prefix
 
         return ""
 

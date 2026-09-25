@@ -13,6 +13,7 @@ from biosafety_defense.defense_agent.schemas import (
     FailureModeTag,
     ToolStatus,
 )
+from biosafety_defense.gateway.triage import FastPathTriage
 from biosafety_defense.memory.conversation_store import ConversationStore
 from biosafety_defense.memory.safety_state import SafetyStateStore
 from biosafety_defense.models.target_backend import BaseTargetBackend
@@ -32,6 +33,8 @@ class ConversationController:
         conversation_store: ConversationStore,
         safety_state_store: SafetyStateStore,
         audit_logger: AuditLogger,
+        triage: Optional[FastPathTriage] = None,
+        max_history_turns: int = 15,
         model_name: str = "defense-reasoner-v0",
     ):
         self.defense_agent = defense_agent
@@ -42,6 +45,8 @@ class ConversationController:
         self.conversation_store = conversation_store
         self.safety_state_store = safety_state_store
         self.audit_logger = audit_logger
+        self.triage = triage
+        self.max_history_turns = max_history_turns
         self.model_info = {"name": model_name, "version": "0.1.0"}
 
     def handle_user_message(
@@ -49,6 +54,7 @@ class ConversationController:
     ) -> Dict[str, Any]:
         """
         Full Section 27 pipeline:
+        0. Fast-path triage (for non-biological, zero-risk turns)
         1. Pre-generation defense
         2. Target LLM execution (if allowed)
         3. Post-generation defense
@@ -59,14 +65,52 @@ class ConversationController:
 
         # Load conversation trajectory and safety state
         state = self.safety_state_store.load(conversation_id)
-        history = self.conversation_store.load(conversation_id)
-        turn = (len(history) // 2) + 1
+        full_history = self.conversation_store.load(conversation_id)
+        turn = (len(full_history) // 2) + 1
+        history = self.conversation_store.get_context_window(
+            conversation_id, max_raw_turns=self.max_history_turns
+        )
+
+        input_artifacts = self.sequence_parser.extract(user_text, source="user_input")
+
+        # -------------------------------------------------------------
+        # STAGE 0: FAST-PATH TRIAGE (Screen mundane non-biological queries)
+        # -------------------------------------------------------------
+        if self.triage and self.triage.is_fast_pass_eligible(user_text, input_artifacts, state):
+            t_target = time.time()
+            response = self.target_model.generate(history, user_text)
+            latencies["target"] = (time.time() - t_target) * 1000
+            latencies["total"] = (time.time() - start_total) * 1000
+
+            self.conversation_store.append(
+                conversation_id=conversation_id,
+                turn=turn,
+                user_text=user_text,
+                delivered_assistant_text=response,
+            )
+
+            self.audit_logger.log_fast_pass(
+                conversation_id=conversation_id,
+                turn=turn,
+                model_info=self.model_info,
+                user_text=user_text,
+                latency_ms=latencies,
+            )
+
+            return {
+                "response": response,
+                "action": "FAST_PASS",
+                "stage": "TRIAGE",
+                "pre_assessment": None,
+                "post_assessment": None,
+                "turn": turn,
+                "conversation_id": conversation_id,
+            }
 
         # -------------------------------------------------------------
         # STAGE 1: PRE-GENERATION DEFENSE
         # -------------------------------------------------------------
         t0 = time.time()
-        input_artifacts = self.sequence_parser.extract(user_text, source="user_input")
 
         pre_context = DefenseContext(
             stage="PRE",

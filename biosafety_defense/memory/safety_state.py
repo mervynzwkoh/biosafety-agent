@@ -12,6 +12,15 @@ from biosafety_defense.defense_agent.schemas import (
 )
 
 
+INTENT_SEVERITY: Dict[str, int] = {
+    "MALICIOUS": 4,
+    "CONCERNING": 3,
+    "AMBIGUOUS": 2,
+    "UNKNOWN": 1,
+    "BENIGN": 0,
+}
+
+
 class SafetyStateStore:
     """Manages persistent structured safety states keyed by conversation_id."""
 
@@ -59,28 +68,57 @@ class SafetyStateStore:
         tool_results: Optional[List[ToolResult]] = None,
     ) -> ConversationSafetyState:
         """Update safety state after turn completion per Section 6 and 24."""
-        # Active assessment is post_assessment if generation proceeded, else pre_assessment
+        from biosafety_defense.tools.sequence_parser import KNOWN_BIOLOGICAL_ENTITIES
+
         active_assessment = post_assessment or pre_assessment
         if not active_assessment:
             return previous_state
 
-        # 1. Update inferred intent with robust fallbacks
-        intent_summary = (
-            active_assessment.state_update.intent_summary
-            or active_assessment.current_user_intent.summary
-            or active_assessment.analysis_summary
-            or active_assessment.rationale
-            or previous_state.inferred_intent.get("summary", "")
-            or "Intent not explicitly articulated."
-        )
-        confidence = active_assessment.current_user_intent.confidence
+        # 1. Update inferred intent with monotonic severity preservation (prevent post-guard intent downgrade)
+        if pre_assessment and post_assessment:
+            pre_cls = pre_assessment.current_user_intent.classification.value
+            post_cls = post_assessment.current_user_intent.classification.value
+            if INTENT_SEVERITY.get(pre_cls, 0) >= INTENT_SEVERITY.get(post_cls, 0):
+                intent_cls = pre_cls
+                intent_summary = (
+                    pre_assessment.state_update.intent_summary
+                    or pre_assessment.current_user_intent.summary
+                    or pre_assessment.analysis_summary
+                    or pre_assessment.rationale
+                    or previous_state.inferred_intent.get("summary", "")
+                    or "Intent not explicitly articulated."
+                )
+                confidence = pre_assessment.current_user_intent.confidence
+            else:
+                intent_cls = post_cls
+                intent_summary = (
+                    post_assessment.state_update.intent_summary
+                    or post_assessment.current_user_intent.summary
+                    or post_assessment.analysis_summary
+                    or post_assessment.rationale
+                    or previous_state.inferred_intent.get("summary", "")
+                    or "Intent not explicitly articulated."
+                )
+                confidence = post_assessment.current_user_intent.confidence
+        else:
+            intent_cls = active_assessment.current_user_intent.classification.value
+            intent_summary = (
+                active_assessment.state_update.intent_summary
+                or active_assessment.current_user_intent.summary
+                or active_assessment.analysis_summary
+                or active_assessment.rationale
+                or previous_state.inferred_intent.get("summary", "")
+                or "Intent not explicitly articulated."
+            )
+            confidence = active_assessment.current_user_intent.confidence
+
         if confidence == 0.0 and intent_summary and intent_summary != "Intent not explicitly articulated.":
             confidence = 0.80
 
         inferred_intent = {
             "summary": intent_summary,
             "confidence": confidence,
-            "classification": active_assessment.current_user_intent.classification.value,
+            "classification": intent_cls,
         }
 
         # 2. Update risk state with monotonic trajectory risk tracking
@@ -104,22 +142,64 @@ class SafetyStateStore:
             if obs not in new_obs:
                 new_obs.append(obs)
 
-        # 4. Accumulate trajectory signals
-        trajectory_signals = list(previous_state.trajectory_signals)
+        # 4. Accumulate trajectory signals without duplicates
+        signals_map = {
+            (s.get("turn"), s.get("type")): s for s in previous_state.trajectory_signals
+        }
         for sig in active_assessment.trajectory_analysis.signals:
             sig_dict = sig.model_dump()
-            if sig_dict not in trajectory_signals:
-                trajectory_signals.append(sig_dict)
+            key = (sig_dict.get("turn"), sig_dict.get("type"))
+            signals_map[key] = sig_dict
+        trajectory_signals = sorted(
+            signals_map.values(), key=lambda s: (s.get("turn", 0), s.get("type", ""))
+        )
 
-        # 5. Accumulate tool evidence
-        tool_evidence = list(previous_state.tool_evidence)
+        # 5. Accumulate tool evidence without duplicates (and purge any legacy duplicates)
+        seen_keys = set()
+        deduped_evidence = []
+        for e in previous_state.tool_evidence:
+            key = (e.get("tool"), e.get("artifact_id"), e.get("turn"), e.get("stage"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped_evidence.append(e)
+
         if tool_results:
             for tr in tool_results:
-                tool_evidence.append(tr.model_dump())
+                tr_dict = tr.model_dump()
+                if tr_dict.get("turn") is None:
+                    tr_dict["turn"] = turn
+                key = (tr_dict.get("tool"), tr_dict.get("artifact_id"), tr_dict.get("turn"), tr_dict.get("stage"))
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    deduped_evidence.append(tr_dict)
+
+        tool_evidence = deduped_evidence
 
         # 6. Accumulate decisions
         previous_decisions = list(previous_state.previous_decisions)
         previous_decisions.append(final_action.value)
+
+        # 7. Accumulate biological entities
+        new_entities = list(previous_state.biological_entities)
+        for text_source in [
+            active_assessment.analysis_summary,
+            active_assessment.current_user_intent.summary,
+            active_assessment.state_update.intent_summary,
+            active_assessment.rationale,
+        ] + active_assessment.state_update.relevant_observations:
+            if text_source:
+                t_lower = text_source.lower()
+                for ent in KNOWN_BIOLOGICAL_ENTITIES:
+                    if ent in t_lower and ent not in new_entities:
+                        new_entities.append(ent)
+
+        if tool_results:
+            for tr in tool_results:
+                art_id = tr.artifact_id or ""
+                if art_id and not art_id.startswith("art_") and not art_id.startswith("seq_"):
+                    clean_ent = art_id.rsplit("_", 1)[0].replace("_", " ")
+                    if clean_ent and clean_ent not in new_entities:
+                        new_entities.append(clean_ent)
 
         updated_state = ConversationSafetyState(
             conversation_id=previous_state.conversation_id,
@@ -128,7 +208,7 @@ class SafetyStateStore:
             risk_state=risk_state,
             observed_capabilities=new_obs,
             trajectory_signals=trajectory_signals,
-            biological_entities=previous_state.biological_entities,
+            biological_entities=new_entities,
             tool_evidence=tool_evidence,
             previous_decisions=previous_decisions,
         )

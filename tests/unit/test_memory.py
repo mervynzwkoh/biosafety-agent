@@ -68,3 +68,77 @@ def test_safety_state_update(tmp_path):
     reloaded = state_store.load(conv_id)
     assert reloaded.turn == 1
     assert reloaded.previous_decisions == ["ALLOW"]
+
+
+def test_tool_evidence_deduplication(tmp_path):
+    from biosafety_defense.defense_agent.schemas import ToolResult, PredictionResult
+    state_store = SafetyStateStore(persistence_dir=str(tmp_path / "states_dedup"))
+    conv_id = "test_conv_dedup"
+    initial_state = state_store.load(conv_id)
+
+    tr1 = ToolResult(
+        tool="toxinpred2",
+        artifact_id="alpha_bungarotoxin_1",
+        turn=1,
+        stage="POST",
+        prediction=PredictionResult(label="NON_TOXIN", score=0.45),
+    )
+    # Identical duplicate result
+    tr2 = ToolResult(
+        tool="toxinpred2",
+        artifact_id="alpha_bungarotoxin_1",
+        turn=1,
+        stage="POST",
+        prediction=PredictionResult(label="NON_TOXIN", score=0.45),
+    )
+
+    assessment = DefenseAssessment(
+        current_user_intent=UserIntentAssessment(
+            classification=IntentClass.BENIGN, summary="Test", confidence=0.8
+        ),
+        risk_assessment=RiskAssessment(overall_risk=0.1),
+    )
+
+    updated = state_store.update_state(
+        previous_state=initial_state,
+        turn=1,
+        pre_assessment=assessment,
+        post_assessment=None,
+        final_action=ActionType.ALLOW,
+        tool_results=[tr1, tr2],
+    )
+
+    # Should only contain 1 entry due to deduplication
+    assert len(updated.tool_evidence) == 1
+    assert updated.tool_evidence[0]["artifact_id"] == "alpha_bungarotoxin_1"
+    assert updated.tool_evidence[0]["turn"] == 1
+    assert updated.tool_evidence[0]["stage"] == "POST"
+
+
+def test_purge_legacy_tool_evidence_duplicates(tmp_path):
+    state_store = SafetyStateStore(persistence_dir=str(tmp_path / "states_legacy"))
+    conv_id = "test_legacy"
+    state = state_store.load(conv_id)
+    # Simulate legacy state with 32 duplicates
+    state.tool_evidence = [
+        {"tool": "toxinpred2", "artifact_id": "art_1", "turn": 1, "stage": "POST"},
+        {"tool": "toxinpred2", "artifact_id": "art_1", "turn": 1, "stage": "POST"},
+        {"tool": "toxinpred2", "artifact_id": "art_2", "turn": 1, "stage": "POST"},
+        {"tool": "toxinpred2", "artifact_id": "art_2", "turn": 1, "stage": "POST"},
+    ]
+    assessment = DefenseAssessment(
+        current_user_intent=UserIntentAssessment(
+            classification=IntentClass.BENIGN, summary="Test", confidence=0.8
+        ),
+        risk_assessment=RiskAssessment(overall_risk=0.1),
+    )
+    updated = state_store.update_state(
+        previous_state=state,
+        turn=2,
+        pre_assessment=assessment,
+        post_assessment=None,
+        final_action=ActionType.ALLOW,
+        tool_results=[],
+    )
+    # Legacy duplicates must be purged to only 2 unique items
+    assert len(updated.tool_evidence) == 2

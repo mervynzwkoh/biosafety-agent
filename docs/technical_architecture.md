@@ -106,9 +106,9 @@ sequenceDiagram
 * **Managing Coordinator:** `biosafety_defense/defense_agent/agent.py`
 * **Interactions:**
   1. **Mandatory Input Sequence Screening:** If input sequence artifacts were detected in Phase 1, `ToxinPred2` is automatically executed via `biosafety_defense/tools/toxinpred2.py` before reasoning commences (fixing pre/post asymmetry).
-  2. `DefenseAgent.evaluate_pre()` formats the context (including any mandatory tool results) using `biosafety_defense/defense_agent/prompts.py` (`format_defense_prompt`) and sends it to `biosafety_defense/models/reasoning_backend.py`.
+  2. `DefenseAgent.evaluate_pre()` formats the context (including any mandatory tool results) using `biosafety_defense/defense_agent/prompts.py` (`format_defense_prompt`), wrapping user input inside untrusted XML boundaries (`<untrusted_user_message>`) and enforcing anti-injection instructions against adversarial prompt steering.
   3. `VLLMReasoningBackend` communicates with the vLLM server on port `8000`, enforcing structured JSON output. If the model output suffers syntax corruption, the backend automatically triggers an internal repair retry loop.
-  4. The controller passes the resulting assessment to `biosafety_defense/defense_agent/policy.py`. If `PolicyEngine.decide()` returns `REFUSE` or `SAFE_RESPONSE`, `InterventionManager` returns a static canned refusal/redirect template, updates stores, logs telemetry, and returns immediately. **The downstream target model is never invoked.**
+  4. The controller passes the resulting assessment to `biosafety_defense/defense_agent/policy.py`. `PolicyEngine.decide()` checks for input toxins, high-confidence malicious intent, and applies `trajectory_escalation_boost` if escalation signals are present. If `PolicyEngine.decide()` returns `REFUSE` or `SAFE_RESPONSE`, `InterventionManager` returns a static canned refusal/redirect template (with zero chain-of-thought leakage), updates stores, logs telemetry, and returns immediately. **The downstream target model is never invoked.**
 
 ---
 
@@ -126,8 +126,8 @@ sequenceDiagram
 * **Interactions:**
   1. The controller runs `SequenceParser.extract()` on candidate response text $y_t$ to detect generated biological sequences.
   2. **Mandatory Output Sequence Screening:** If output protein sequences are detected, `ToxinPred2` is automatically executed immediately.
-  3. The controller calls `DefenseAgent.evaluate_post()` with the candidate response and tool observations.
-  4. The reasoning model is prompted with `POST_GUARD_SYSTEM_PROMPT`, evaluating whether the candidate output contains dangerous actionable protocols, synthesis instructions, or hazardous biological materials in light of the pre-guard intent context.
+  3. The controller calls `DefenseAgent.evaluate_post()` with candidate response sandboxed inside `<untrusted_candidate_response>` tags.
+  4. Pre-guard trajectory escalation signals and high-water risk marks are preserved, preventing candidate output phrasing from eroding pre-guard safety boundaries.
   5. `PolicyEngine.decide(stage="POST")` deterministically checks if a computational toxin was generated or if risk thresholds were breached. If unsafe, `InterventionManager.apply()` performs **static template replacement** with a canned refusal string (ensuring zero chance of model-generated secondary leakage).
 
 ---
@@ -135,13 +135,14 @@ sequenceDiagram
 ### Phase 5: Monotonic State Persistence & Telemetry Logging
 * **Managing Coordinator:** `biosafety_defense/gateway/conversation_controller.py`
 * **Interactions:**
-  1. **Dialogue History:** `ConversationStore.append()` stores the user prompt and the **actual delivered assistant text** (never blocked candidate text). The full unbroken dialogue transcript is retained without premature summarization for prototype sessions (up to 30 turns).
+  1. **Dialogue History:** `ConversationStore.append()` stores the user prompt and the **actual delivered assistant text** (never blocked candidate text). Dynamic context windowing (`max_history_turns=15`) prevents context overflow on extended sessions.
   2. **Monotonic Structured State:** `SafetyStateStore.update_state()` updates the ongoing conversation record:
      * Observed capabilities, escalation signals, and historical risk markers are **strictly append-only / monotonic**, preventing adversarial filler turns from diluting or erasing past red flags.
-     * Updates current `inferred_intent` and `confidence`.
+     * Enforces **intent severity monotonicity** (`MALICIOUS` > `CONCERNING` > `AMBIGUOUS` > `UNKNOWN` > `BENIGN`), preventing benign candidate output phrasing from downgrading detected harmful intent.
+     * Automatically extracts and accumulates named `biological_entities` across turns.
      * Appends tool evidence and decision history (`["ALLOW", "ALLOW", ...]`).
   3. **Audit Logging:** `biosafety_defense/audit/audit_logger.py` records:
-     * Structured turn record to `logs/audit.jsonl` with latency breakdown, risk dimensions, artifact hashes, and failure taxonomy tags.
+     * Structured turn record to `logs/audit.jsonl` with latency breakdown, risk dimensions, artifact hashes, failure taxonomy tags, and fast-pass telemetry.
      * Full trajectory state to `logs/trajectories.jsonl` formatted for future Multi-Turn Safety Alignment (MTSA) fine-tuning.
 
 ---
@@ -152,15 +153,16 @@ The table below summarizes the exact callers, dependencies, and data exchanges f
 
 | Component File | Direct Callers | Subordinate Components Invoked | Primary Data Passed / Returned |
 | :--- | :--- | :--- | :--- |
-| **`biosafety_defense/gateway/conversation_controller.py`** | `app.py`, test suites | `SequenceParser`, `DefenseAgent`, `PolicyEngine`, `InterventionManager`, `SafetyStateStore`, `ConversationStore`, `AuditLogger`, `VLLMTargetBackend` | Receives raw prompt; coordinates triage, pre-guard, target, post-guard; returns final response dict and execution metadata. |
-| **`biosafety_defense/defense_agent/agent.py`** | `ConversationController` | `VLLMReasoningBackend`, `ToolRegistry`, `prompts.py` | Receives `DefenseContext`; returns `(DefenseAssessment, ToolResult[])`. |
-| **`biosafety_defense/defense_agent/prompts.py`** | `DefenseAgent`, `VLLMReasoningBackend` | `schemas.py` | Formats `DefenseContext` into system & user prompt strings. |
-| **`biosafety_defense/defense_agent/policy.py`** | `ConversationController` | `schemas.py` | Evaluates `DefenseAssessment` against YAML thresholds; returns `ActionType`. |
+| **`biosafety_defense/gateway/conversation_controller.py`** | `app.py`, test suites | `FastPathTriage`, `SequenceParser`, `DefenseAgent`, `PolicyEngine`, `InterventionManager`, `SafetyStateStore`, `ConversationStore`, `AuditLogger`, `VLLMTargetBackend` | Receives raw prompt; coordinates triage, pre-guard, target, post-guard; returns final response dict and execution metadata. |
+| **`biosafety_defense/gateway/triage.py`** | `ConversationController` | `schemas.py` | Rapidly evaluates non-biological keywords and prior conversation risk; returns boolean fast-pass eligibility. |
+| **`biosafety_defense/defense_agent/agent.py`** | `ConversationController` | `VLLMReasoningBackend`, `ToolRegistry`, `prompts.py` | Receives `DefenseContext`; executes mandatory screening in pre/post; returns `(DefenseAssessment, ToolResult[])`. |
+| **`biosafety_defense/defense_agent/prompts.py`** | `DefenseAgent`, `VLLMReasoningBackend` | `schemas.py` | Formats `DefenseContext` into sandboxed XML prompts with anti-injection instructions. |
+| **`biosafety_defense/defense_agent/policy.py`** | `ConversationController` | `schemas.py` | Evaluates `DefenseAssessment` against YAML thresholds; applies escalation boost; returns `ActionType`. |
 | **`biosafety_defense/tools/sequence_parser.py`** | `ConversationController` | `schemas.py` | Scans string; returns `BiologicalArtifact[]` with validated sequences & hashes. |
 | **`biosafety_defense/tools/registry.py`** | `DefenseAgent`, `ConversationController` | `ToxinPred2Tool` | Dispatches tool calls to registered tools; returns `ToolResult[]`. |
 | **`biosafety_defense/tools/toxinpred2.py`** | `ToolRegistry`, `ConversationController` | `schemas.py` | Takes amino acid sequence; returns `ToolResult` (label, score, status). |
-| **`biosafety_defense/memory/safety_state.py`** | `ConversationController` | `schemas.py` | Stores & updates persistent monotonic structured JSON safety state. |
-| **`biosafety_defense/memory/conversation_store.py`**| `ConversationController` | `schemas.py` | Persists dialogue turns to SQLite; provides full unbroken session history. |
+| **`biosafety_defense/memory/safety_state.py`** | `ConversationController` | `schemas.py` | Stores & updates persistent monotonic structured JSON safety state and biological entities. |
+| **`biosafety_defense/memory/conversation_store.py`**| `ConversationController` | `schemas.py` | Persists dialogue turns to SQLite; provides sliding context window. |
 | **`biosafety_defense/models/reasoning_backend.py`** | `DefenseAgent` | `prompts.py`, `schemas.py`, vLLM server | Sends structured JSON completion requests; retries with repair prompt on error. |
 | **`biosafety_defense/models/target_backend.py`** | `ConversationController` | `schemas.py`, vLLM server | Queries black-box target model for candidate text $y_t$. |
 | **`biosafety_defense/audit/audit_logger.py`** | `ConversationController` | `schemas.py` | Appends decision telemetry to `audit.jsonl` and training data to `trajectories.jsonl`. |
@@ -217,7 +219,8 @@ biosafety-agent/
 │
 ├── biosafety_defense/
 │   ├── gateway/
-│   │   └── conversation_controller.py   # Central lifecycle coordinator (Stages 1-4)
+│   │   ├── conversation_controller.py   # Central lifecycle coordinator (Stages 1-4)
+│   │   └── triage.py                    # Fast-path triage screening (Stage 0)
 │   ├── defense_agent/
 │   │   ├── agent.py                     # Pre/post-guard reasoning & tool loop
 │   │   ├── policy.py                    # Deterministic policy engine & interventions
